@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.1] - 2026-09-28
+
+- All four Android ABIs: arm64-v8a, armeabi-v7a, x86_64, x86 (one
+  pattern rule per NDK triple; `-Werror` clean on 32-bit too).
+- Added the missing `android` make target.
+
 ## [1.0.0] - 2026-09-28
 
 Initial release.

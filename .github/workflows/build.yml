@@ -37,21 +37,21 @@ jobs:
       - name: Run Unit Tests
         run: make test
 
-      - name: Build Android Binary
+      - name: Build Android Binaries
         run: make android
 
-      - name: Upload Artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: fgres-android
-          path: target/fgres-android
+          name: fgres-android-all-abis
+          path: target/fgres-android-*
           if-no-files-found: error
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/fgres-android
+          files: target/fgres-android-*
           generate_release_notes: true
           draft: false
           prerelease: false

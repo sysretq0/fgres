@@ -53,18 +53,21 @@ make            # unit tests + host binary + android binary
 make test       # target/fgres_test (assert-based, no framework)
 ```
 
-Needs `clang` with `lld` (the `-flto` link). Android cross-build needs
-`aarch64-linux-android24-clang` on PATH; override with `ANDROID_CC=...`.
-Output in `target/`: `fgres` (host), `fgres_test`, `fgres-android`.
+Needs `clang` with `lld` (the `-flto` link). Android cross-build needs the
+NDK `*-linux-android24-clang` triples on PATH ( override the API level with
+`ANDROID_API=...`). Output in `target/`: `fgres` (host), `fgres_test`, and
+`fgres-android-<arm64-v8a|armeabi-v7a|x86_64|x86>`.
 
 ## Compatibility
 
 - **API floor 24** (Android 7.0+): the toolchain target is
-  `aarch64-linux-android24`, and every libc/kernel call used
-  (`inotify_init1`, `openat`/`fstatat`, `signal`, `fcntl`, `writev`,
+  `*-linux-android24` for all four ABIs (arm64-v8a, armeabi-v7a, x86_64,
+  x86), and every libc/kernel call used (`inotify_init1`,
+  `openat`/`fstatat`, `signal`, `fcntl`, `writev`,
   `__android_log_print`) exists at 24. Built here with NDK r30.
-- **arm64 only**: single `ANDROID_CC` triple (thin daemon, one binary).
-  No fork/exec/threads anywhere — the whole program is one blocking loop.
+- **ABIs**: arm64-v8a, armeabi-v7a, x86_64, x86 — one static-pattern rule
+  per triple, same flags. No fork/exec/threads anywhere — the whole program
+  is one blocking loop.
 - **Device requirements**: `/dev/cpuset/top-app/cgroup.procs` must exist
   (cgroup v1 cpuset layout; without it the daemon exits with
   `inotify_add_watch failed`). Needs a context that can read that file,
