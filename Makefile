@@ -8,6 +8,7 @@ endif
 ANDROID_CC ?= aarch64-linux-android24-clang
 CFLAGS   ?= -std=c11 -O2 -flto -Wall -Wextra -Werror
 LINKER ?= lld
+STRIP  ?= llvm-strip
 OUT      := target
 
 HOST  := $(OUT)/fgres
@@ -23,13 +24,16 @@ test: $(TEST)
 # clang + lld by default: -flto needs the LTO plugin (gcc's ld.bfd lacks it).
 $(TEST): fgres.c | $(OUT)
 	$(CC) $(CFLAGS) -fuse-ld=$(LINKER) -DFGRES_TEST $< -o $@
+	$(STRIP) $@
 
 $(HOST): fgres.c | $(OUT)
 	$(CC) $(CFLAGS) -fuse-ld=$(LINKER) $< -o $@
+	$(STRIP) $@
 
 # links liblog on Android only; NDK clang is hardcoded to the API level.
 $(DROID): fgres.c | $(OUT)
 	$(ANDROID_CC) $(CFLAGS) $< -o $@ -llog
+	$(STRIP) $@
 
 $(OUT):
 	mkdir -p $(OUT)
