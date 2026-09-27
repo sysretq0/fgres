@@ -18,6 +18,8 @@ DROID := $(OUT)/fgres-android
 .PHONY: all test android clean
 all: test $(HOST) $(DROID)
 
+android: $(DROID)
+
 test: $(TEST)
 	./$(TEST)
 

@@ -1,0 +1,59 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Test & Build Android Binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Host Toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+
+      - name: Setup Android NDK (r30)
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r30
+          add-to-path: true
+
+      - name: Add NDK Toolchain to PATH
+        run: |
+          echo "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Run Unit Tests
+        run: make test
+
+      - name: Build Android Binary
+        run: make android
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fgres-android
+          path: target/fgres-android
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/fgres-android
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
