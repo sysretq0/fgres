@@ -57,6 +57,22 @@ Needs `clang` with `lld` (the `-flto` link). Android cross-build needs
 `aarch64-linux-android24-clang` on PATH; override with `ANDROID_CC=...`.
 Output in `target/`: `fgres` (host), `fgres_test`, `fgres-android`.
 
+## Compatibility
+
+- **API floor 24** (Android 7.0+): the toolchain target is
+  `aarch64-linux-android24`, and every libc/kernel call used
+  (`inotify_init1`, `openat`/`fstatat`, `signal`, `fcntl`, `writev`,
+  `__android_log_print`) exists at 24. Built here with NDK r30.
+- **arm64 only**: single `ANDROID_CC` triple (thin daemon, one binary).
+  No fork/exec/threads anywhere — the whole program is one blocking loop.
+- **Device requirements**: `/dev/cpuset/top-app/cgroup.procs` must exist
+  (cgroup v1 cpuset layout; without it the daemon exits with
+  `inotify_add_watch failed`). Needs a context that can read that file,
+  `stat`/`read` other uids' procfs entries, and write logd (plain `shell`
+  qualifies — no root required).
+- **Host build** is glibc/Linux for the harness; daemon behavior is
+  identical, sinks differ (stderr instead of logcat).
+
 ## Test harness
 
 `scripts/emulate.sh` builds a fake /proc tree + fake cgroup.procs and drives
