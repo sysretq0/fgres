@@ -196,11 +196,12 @@ static size_t read_proc_file(int procfd, uint32_t pid, const char *file, uint8_t
  * (first arg) for ':' or '/'. A zygote-forked app always rewrites argv[0] to
  * a bare package name: ':' marks a service subprocess, '/' marks a native
  * binary exec'd under an app uid (e.g. a terminal's /system/bin/sh). Either
- * way it is not a top-level app process. The shared uid 1000 additionally
- * requires a '.' (dotted APK procs only — never bare system procs/shells).
- * cmdline is immune to comm's 15-char truncation. Already-read buffer only:
- * zero extra syscalls. 128B covers long package names before the ':'. */
-static bool cmdline_not_app(int procfd, uint32_t pid, uint32_t uid) {
+ * way it is not a top-level app process. argv[0] must additionally carry a
+ * '.' (dotted APK procs only — never bare system procs/shells, whatever
+ * the uid). cmdline is immune to comm's 15-char truncation. Already-read
+ * buffer only: zero extra syscalls. 128B covers long package names before
+ * the ':'. */
+static bool cmdline_not_app(int procfd, uint32_t pid) {
     uint8_t buf[128];
     size_t n = read_proc_file(procfd, pid, "cmdline", buf, sizeof(buf));
     size_t end = 0;
@@ -213,7 +214,7 @@ static bool cmdline_not_app(int procfd, uint32_t pid, uint32_t uid) {
         if (buf[i] == '.')
             dot = true;
     }
-    if (uid % 100000u == 1000u && end != 0 && !dot)
+    if (end != 0 && !dot)
         return true;
     return false;
 }
@@ -223,9 +224,9 @@ static bool cmdline_not_app(int procfd, uint32_t pid, uint32_t uid) {
 /* Vet the winner and copy its package name in a single cmdline read -> pkg
  * length into out (>= PKGMAX+1 bytes). A vetted top-level app process always
  * carries its bare package name as argv[0]. Returns 0 (no emit, no latch) on
- * shells/services/bare uid-1000 procs (same rule as the tiebreak) and on
- * transient empty/'<pre-initialized>' cmdlines. */
-static size_t vet_pkg(int procfd, uint32_t pid, uint32_t uid, char *out) {
+ * shells/services/bare procs (same rule as the tiebreak) and on transient
+ * empty/'<pre-initialized>' cmdlines. */
+static size_t vet_pkg(int procfd, uint32_t pid, char *out) {
     uint8_t cbuf[PKGMAX];
     size_t n = read_proc_file(procfd, pid, "cmdline", cbuf, sizeof(cbuf));
     size_t end = 0;
@@ -240,8 +241,8 @@ static size_t vet_pkg(int procfd, uint32_t pid, uint32_t uid, char *out) {
         if (cbuf[i] == '.')
             dot = true;
     }
-    if (uid % 100000u == 1000u && !dot)
-        return 0; /* shared uid 1000: dotted APK procs only */
+    if (!dot)
+        return 0; /* dotted APK procs only, whatever the uid */
     memcpy(out, cbuf, end);
     out[end] = '\0';
     return end;
@@ -324,8 +325,8 @@ static Fg resolve(const uint8_t *payload, size_t len, int procfd) {
      * single cmdline read (vet_pkg below). */
     if (second.pid == 0)
         return cand;
-    bool c1 = cmdline_not_app(procfd, cand.pid, cand.uid);
-    bool c2 = cmdline_not_app(procfd, second.pid, second.uid);
+    bool c1 = cmdline_not_app(procfd, cand.pid);
+    bool c2 = cmdline_not_app(procfd, second.pid);
     if (!c1 && c2)
         return cand;
     if (c1 && !c2)
@@ -432,7 +433,7 @@ int main(int argc, char **argv) {
     if (n > 0 && (size_t)n != sizeof(tmp)) { /* == cap: truncated, skip */
         Fg fg = resolve(tmp, (size_t)n, procfd);
         if (fg.pid != 0) {
-            size_t plen = vet_pkg(procfd, fg.pid, fg.uid, pkg);
+            size_t plen = vet_pkg(procfd, fg.pid, pkg);
             if (plen != 0) {
                 memcpy(latched, tmp, (size_t)n);
                 last_len = (size_t)n;
@@ -492,7 +493,7 @@ int main(int argc, char **argv) {
         }
 
         /* 8. emit path: package name is the winner's cmdline argv[0]. */
-        size_t pl = vet_pkg(procfd, fg.pid, fg.uid, pkg);
+        size_t pl = vet_pkg(procfd, fg.pid, pkg);
         if (pl == 0) {
             /* name not settled yet (<pre-initialized>, or gone between resolve
              * and read): no latch, no emit — the recurring payload retries. */

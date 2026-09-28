@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.2] - 2026-09-28
+
+- Collapsed cmdline vetting to a single uid-independent rule: winner's
+  argv[0] must be dotted and free of `:`/`/` (`cmdline_not_app`/`vet_pkg`
+  drop the uid parameter; bare procs of any uid never emit).
+
 ## [1.0.1] - 2026-09-28
 
 - All four Android ABIs: arm64-v8a, armeabi-v7a, x86_64, x86 (one
