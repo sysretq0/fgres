@@ -192,33 +192,6 @@ static size_t read_proc_file(int procfd, uint32_t pid, const char *file, uint8_t
     return r > 0 ? (size_t)r : 0;
 }
 
-/* Read /proc/<pid>/cmdline (NUL-separated argv) and check the process name
- * (first arg) for ':' or '/'. A zygote-forked app always rewrites argv[0] to
- * a bare package name: ':' marks a service subprocess, '/' marks a native
- * binary exec'd under an app uid (e.g. a terminal's /system/bin/sh). Either
- * way it is not a top-level app process. argv[0] must additionally carry a
- * '.' (dotted APK procs only — never bare system procs/shells, whatever
- * the uid). cmdline is immune to comm's 15-char truncation. Already-read
- * buffer only: zero extra syscalls. 128B covers long package names before
- * the ':'. */
-static bool cmdline_not_app(int procfd, uint32_t pid) {
-    uint8_t buf[128];
-    size_t n = read_proc_file(procfd, pid, "cmdline", buf, sizeof(buf));
-    size_t end = 0;
-    while (end < n && buf[end] != 0)
-        end++;
-    bool dot = false;
-    for (size_t i = 0; i < end; i++) {
-        if (buf[i] == ':' || buf[i] == '/')
-            return true;
-        if (buf[i] == '.')
-            dot = true;
-    }
-    if (end != 0 && !dot)
-        return true;
-    return false;
-}
-
 /* ---- emit-path vetting + package name: winner's cmdline argv[0] ---- */
 
 /* Vet the winner and copy its package name in a single cmdline read -> pkg
@@ -246,6 +219,16 @@ static size_t vet_pkg(int procfd, uint32_t pid, char *out) {
     memcpy(out, cbuf, end);
     out[end] = '\0';
     return end;
+}
+
+/* Tiebreak predicate via the emit vetter: a second cmdline read is cheaper
+ * than a divergent copy. Note the deliberate flip vs the old inline scan:
+ * an empty (reaped-transient) cmdline now counts as not-app, so a live
+ * candidate paired with a transient wins immediately instead of waiting a
+ * payload round. */
+static bool cmdline_not_app(int procfd, uint32_t pid) {
+    char tmp[PKGMAX + 1];
+    return vet_pkg(procfd, pid, tmp) == 0;
 }
 #endif
 

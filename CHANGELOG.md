@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.3] - 2026-09-28
+
+- Deduplicated tiebreak vetting: `cmdline_not_app()` is now
+  `vet_pkg() == 0`. One behavior flip, by design: an empty
+  (reaped-transient) cmdline now counts as not-app, so a live candidate
+  paired with a transient wins immediately instead of waiting a payload
+  round.
+
 ## [1.0.2] - 2026-09-28
 
 - Collapsed cmdline vetting to a single uid-independent rule: winner's
