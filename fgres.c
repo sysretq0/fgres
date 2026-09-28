@@ -20,6 +20,7 @@
 
 #define _GNU_SOURCE 1 /* inotify_*, O_CLOEXEC under -std=c11 (no-op on bionic) */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -211,6 +212,9 @@ static size_t vet_pkg(int procfd, uint32_t pid, char *out) {
     for (size_t i = 0; i < end; i++) {
         if (cbuf[i] == ':' || cbuf[i] == '/')
             return 0; /* service/shell: never emit */
+        if (cbuf[i] < 0x20 || cbuf[i] == 0x7f)
+            return 0; /* control bytes: argv is userspace-writable, never
+                       * let it forge log lines */
         if (cbuf[i] == '.')
             dot = true;
     }
@@ -232,6 +236,55 @@ static bool cmdline_not_app(int procfd, uint32_t pid) {
 }
 #endif
 
+#ifndef FGRES_TEST
+/* Shared candidate gate: fstat uid+threads, app_id allowlist, oom adj 0.
+ * Returns the uid, or 0 on reject. */
+static uint32_t gated_uid(int procfd, uint32_t pid) {
+    /* fstatat <pid>/task -> uid + thread count. Cheap, no read of file
+     * content. A spawned shell/pty runs 1-3 threads; a Zygote app
+     * carries 20+. Rejected outright (never merged). */
+    unsigned nthread;
+    uint32_t uid = fstat_proc(procfd, pid, &nthread);
+    if (uid == 0 || nthread <= THREADMIN)
+        return 0;
+    /* app_id normalizes across users/work profiles (uid = user*100000 + app_id) */
+    uint32_t app_id = uid % 100000u;
+    bool keep = app_id == 1000u || (app_id >= 10000u &&
+                                    !(SDK_SANDBOX_LO <= app_id && app_id <= SDK_SANDBOX_HI) &&
+                                    !(ISOLATED_LO <= app_id && app_id <= ISOLATED_HI));
+    if (!keep)
+        return 0;
+    /* oom gate: the kernel formats adj 0 canonically as "0\n" — the only
+     * value accepted, so a literal 2-byte compare replaces parsing. */
+    uint8_t adj_buf[2];
+    size_t n = read_proc_file(procfd, pid, "oom_score_adj", adj_buf, sizeof(adj_buf));
+    if (n != 2 || adj_buf[0] != '0' || adj_buf[1] != '\n')
+        return 0;
+    return uid;
+}
+
+/* Runner-up retry for the emit path: if the winner fails vetting (e.g. a
+ * stale ':service' subprocess outliving its restarted main process), try
+ * the next gated pid of the same uid from the same payload. Returns 0
+ * when no runner-up vets clean. */
+static uint32_t retry_same_uid(const uint8_t *payload, size_t len, int procfd,
+                               uint32_t uid, uint32_t after_pid,
+                               char *out) {
+    uint32_t pids[BUFSZ / 2];
+    size_t npid = scan_pids(payload, payload + len, pids, sizeof(pids) / sizeof(pids[0]));
+    for (size_t pi = 0; pi < npid; pi++) {
+        uint32_t pid = pids[pi];
+        if (pid <= after_pid)
+            continue;
+        if (gated_uid(procfd, pid) != uid)
+            continue;
+        if (vet_pkg(procfd, pid, out) != 0)
+            return pid;
+    }
+    return 0;
+}
+#endif
+
 /*
  * Resolve the foreground app from a top-app payload.
  *
@@ -242,7 +295,10 @@ static bool cmdline_not_app(int procfd, uint32_t pid) {
  * representative). A lone candidate returns unvetted; the emit path vets +
  * names it in one cmdline read (vet_pkg). 2 distinct real uids at adj 0 happens legitimately (home:
  * launcher + app:service; split-screen: two activities): drop ':'-bearing
- * process names (service subprocesses, never activity hosts) via cmdline;
+ * process names via cmdline (service subprocesses are never emitted
+ * themselves; note an activity *can* legally live in an
+ * android:process=":x" subprocess, which this rule then misses — accepted
+ * limitation, the common case is unambiguous);
  * exactly one survivor wins, otherwise none. 3rd distinct uid -> bail now.
  * Returns pid==0 for none.
  */
@@ -254,33 +310,15 @@ static Fg resolve(const uint8_t *payload, size_t len, int procfd) {
     for (size_t pi = 0; pi < npid; pi++) {
         uint32_t pid = pids[pi];
 
-        /* fstatat <pid>/task -> uid + thread count. Cheap, no read of file
-         * content. A spawned shell/pty runs 1-3 threads; a Zygote app
-         * carries 20+. Rejected outright (never merged). */
-        unsigned nthread;
-        uint32_t uid = fstat_proc(procfd, pid, &nthread);
-        if (uid == 0 || nthread <= THREADMIN)
-            continue;
-        /* app_id normalizes across users/work profiles (uid = user*100000 + app_id) */
-        uint32_t app_id = uid % 100000u;
-        bool keep = app_id == 1000u || (app_id >= 10000u &&
-                                        !(SDK_SANDBOX_LO <= app_id && app_id <= SDK_SANDBOX_HI) &&
-                                        !(ISOLATED_LO <= app_id && app_id <= ISOLATED_HI));
-        if (!keep)
+        uint32_t uid = gated_uid(procfd, pid);
+        if (uid == 0)
             continue;
 
         /* Same uid already represented by a lower pid (cgroup.procs is
          * pid-sorted ascending): this pid loses the merge regardless of its
-         * adj, and can never be the 2nd-uid tiebreak. Skip 3 syscalls. */
+         * adj, and can never be the 2nd-uid tiebreak. Skip 1 syscall. */
         if ((cand.pid != 0 && cand.uid == uid && pid > cand.pid) ||
             (second.pid != 0 && second.uid == uid && pid > second.pid))
-            continue;
-
-        /* oom gate: the kernel formats adj 0 canonically as "0\n" — the only
-         * value accepted, so a literal 2-byte compare replaces parsing. */
-        uint8_t adj_buf[2];
-        size_t n = read_proc_file(procfd, pid, "oom_score_adj", adj_buf, sizeof(adj_buf));
-        if (n != 2 || adj_buf[0] != '0' || adj_buf[1] != '\n')
             continue;
 
         if (cand.pid == 0) {
@@ -321,33 +359,39 @@ static Fg resolve(const uint8_t *payload, size_t len, int procfd) {
 
 #ifndef FGRES_TEST
 static void emit_fg(Fg fg, const char *pkg, size_t plen) {
-    /* logcat single line: "fg pid=<pid> uid=<uid> pkg=<pkg>" */
+    /* logcat single line: "fg pid=<pid> uid=<uid> pkg=<pkg>".
+     * plen > 0 always (all callers vet first); no empty branch. */
     char msg[320]; /* 7+10 + 5+10 + 5 + 255 pkg + NUL */
     size_t i = write_u32(msg, 0, "fg pid=", fg.pid);
     i = write_u32(msg, i, " uid=", fg.uid);
-    if (plen > 0) {
-        memcpy(msg + i, " pkg=", 5);
-        i += 5;
-        memcpy(msg + i, pkg, plen);
-        i += plen;
-    }
+    memcpy(msg + i, " pkg=", 5);
+    i += 5;
+    memcpy(msg + i, pkg, plen);
+    i += plen;
     log_print(4, msg, i); /* ANDROID_LOG_INFO */
 }
 #endif
 
 #ifndef FGRES_TEST
 int main(int argc, char **argv) {
-    stdout_listener = isatty(STDOUT_FILENO) || getenv("FGRES_STDOUT") != NULL;
+    const char *soe = getenv("FGRES_STDOUT");
+    stdout_listener = isatty(STDOUT_FILENO) ||
+        (soe != NULL && soe[0] != '\0' && soe[0] != '0');
     /* stdout is best-effort: a terminal/pipe consumer that stops draining (or
      * goes away) must never stall or kill the event loop. Ignore SIGPIPE so a
      * closed pty/pipe yields EPIPE, and go non-blocking so a full one yields
      * EAGAIN; either way the write is skipped and logcat still gets the line.
+     * The non-blocking flag lives on the shared open file description, so it
+     * is set only when stdout is actually used — never leak EAGAIN into a
+     * parent shell/pipe that outlives us.
      * ponytail: partial non-blocking writes are left as-is, listener fidelity
      * is cosmetic next to loop liveness. */
     signal(SIGPIPE, SIG_IGN);
-    int sfl = fcntl(STDOUT_FILENO, F_GETFL);
-    if (sfl >= 0)
-        fcntl(STDOUT_FILENO, F_SETFL, sfl | O_NONBLOCK);
+    if (stdout_listener) {
+        int sfl = fcntl(STDOUT_FILENO, F_GETFL);
+        if (sfl >= 0)
+            fcntl(STDOUT_FILENO, F_SETFL, sfl | O_NONBLOCK);
+    }
 
     /* Test hook: argv[1] = watch path override, argv[2] = /proc root override
      * (emulation harness builds a fake proc tree; defaults keep prod behavior). */
@@ -417,6 +461,17 @@ int main(int argc, char **argv) {
         Fg fg = resolve(tmp, (size_t)n, procfd);
         if (fg.pid != 0) {
             size_t plen = vet_pkg(procfd, fg.pid, pkg);
+            if (plen == 0) {
+                /* same runner-up fallback as the event loop: a stale
+                 * ':service' subprocess as initial winner must not silence
+                 * startup until the next transition. */
+                uint32_t alt = retry_same_uid(tmp, (size_t)n, procfd,
+                                              fg.uid, fg.pid, pkg);
+                if (alt != 0) {
+                    plen = strlen(pkg);
+                    fg.pid = alt;
+                }
+            }
             if (plen != 0) {
                 memcpy(latched, tmp, (size_t)n);
                 last_len = (size_t)n;
@@ -432,10 +487,13 @@ int main(int argc, char **argv) {
     char evbuf[64];
     for (;;) {
         ssize_t rn = read(fd, evbuf, sizeof(evbuf));
-        if (rn < (ssize_t)sizeof(struct inotify_event)) {
-            /* short read, error, or EINTR: re-block either way */
-            continue;
+        if (rn < 0) {
+            if (errno == EINTR)
+                continue;
+            die("inotify read failed"); /* persistent fd error: never spin */
         }
+        if (rn < (ssize_t)sizeof(struct inotify_event))
+            continue; /* short read: re-block */
 
         /* 4. read the cgroup.procs payload. Fresh open every time: cgroup v1
          * caches the pidlist per open fd for 1s (cgroup_pidlist_start/stop),
@@ -478,9 +536,15 @@ int main(int argc, char **argv) {
         /* 8. emit path: package name is the winner's cmdline argv[0]. */
         size_t pl = vet_pkg(procfd, fg.pid, pkg);
         if (pl == 0) {
-            /* name not settled yet (<pre-initialized>, or gone between resolve
-             * and read): no latch, no emit — the recurring payload retries. */
-            continue;
+            /* Winner failed vetting (stale ':service' subprocess outliving a
+             * restarted main process, or transient name): try the next gated
+             * pid of the same uid from this same payload before giving up. */
+            uint32_t alt = retry_same_uid(tmp, (size_t)plen, procfd,
+                                          fg.uid, fg.pid, pkg);
+            if (alt == 0)
+                continue; /* no runner-up: no latch, no emit */
+            pl = strlen(pkg);
+            fg.pid = alt;
         }
 
         /* latch the payload only on a successful emit-ready resolve */

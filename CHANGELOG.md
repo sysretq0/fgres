@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.4] - 2026-09-28
+
+- Robustness batch: `O_NONBLOCK` only when stdout is actually used (never
+  leaks `EAGAIN` into a parent shell); `vet_pkg` rejects control bytes
+  (argv is userspace-writable, can't forge log lines); persistent inotify
+  fd errors die instead of hot-spinning; `FGRES_STDOUT=0`/empty means off;
+  emit path retries the next gated pid of the same uid when the winner
+  fails vetting (stale `:service` subprocess case, now also covered on the
+  startup pass). Shared `gated_uid()` helper; `:process` activities
+  documented as an accepted blind spot. Removed the dead `plen > 0` guard
+  in `emit_fg` (all callers vet first).
+
 ## [1.0.3] - 2026-09-28
 
 - Deduplicated tiebreak vetting: `cmdline_not_app()` is now
